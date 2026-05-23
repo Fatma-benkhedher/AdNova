@@ -1,0 +1,331 @@
+"""
+audience_dataset — Data Augmentation Script
+============================================
+Balances:
+  • Gender   : Homme 55 → Femme boosted to ~50 / 50
+  • Age range: adds bébé, enfant, personne_agée (currently 0)
+  • Emotion  : flattens triste/peur dominance, adds dégout
+  • Dwell    : realistic jitter per age group
+  • Gender confidence : sampled from real distribution per gender
+
+Output
+------
+  augmented_dataset.csv   — original rows + synthetic rows
+  augmentation_report.txt — before/after counts
+"""
+
+import csv
+import random
+import uuid
+from collections import Counter
+from datetime import datetime, timedelta
+from io import StringIO
+
+# ─────────────────────────────────────────
+# 1.  ORIGINAL DATA  (paste your CSV here)
+# ─────────────────────────────────────────
+ORIGINAL_CSV = """\
+id,track_id,dwell_seconds,age_estimated,age_range,gender,gender_confidence,emotion_estimated,created_at,validated,session_id,camera_id,roi_name,image_name
+008b3d4f-5ffb-428c-a3be-0f80acfeab16,22,6.18,32,adulte,Femme,0.7244,triste,2026-04-14 08:53:18.631094+00,true,session_20260414_085239,camera_01,central_zone,face_22_20260414_085318_630094.jpg
+05f2c580-d2ce-470b-92e3-ee25118036aa,65,5.43,32,adulte,Homme,0.8197,peur,2026-04-14 09:00:12.890039+00,true,session_20260414_085723,camera_01,central_zone,face_65_20260414_090012_888040.jpg
+0b294444-eef5-4f71-b849-da3a443183cc,74,5.85,34,adulte,Femme,0.9987,neutre,2026-04-13 22:17:31.580652+00,true,session_20260413_221415,camera_01,central_zone,face_74_20260413_221731_578644.jpg
+0c14bcfa-87fb-4605-bb5f-23c19eb46a3f,32,5.96,25,jeune,Femme,0.8341,peur,2026-04-14 08:59:09.600757+00,true,session_20260414_085723,camera_01,central_zone,face_32_20260414_085909_599757.jpg
+0e03dc5c-ac12-484a-8f7c-b81691b33737,22,5.97,26,jeune,Homme,0.8782,triste,2026-04-14 08:53:43.407263+00,true,session_20260414_085239,camera_01,central_zone,face_22_20260414_085343_404260.jpg
+15753c22-1dd9-44ad-8f4a-5113a4c15e55,1,5.78,29,jeune,Homme,0.9448,heureux,2026-04-14 08:58:11.303168+00,true,session_20260414_085723,camera_01,central_zone,face_1_20260414_085811_301167.jpg
+16fd9037-3473-43ca-8806-d5465c156c81,17,6.34,34,adulte,Homme,1,triste,2026-04-13 22:50:14.894873+00,true,session_20260413_224928,camera_01,central_zone,face_17_20260413_225014_893873.jpg
+18834048-30e6-43c7-97c5-cf3e66d95c11,65,5.78,32,adulte,Homme,0.9158,triste,2026-04-13 22:52:18.894421+00,true,session_20260413_224928,camera_01,central_zone,face_65_20260413_225218_893422.jpg
+18c87ceb-5830-4a5d-b2d4-c35427301e6e,1,11.73,31,adulte,Homme,0.8792,triste,2026-04-14 08:57:37.270532+00,true,session_20260414_085723,camera_01,central_zone,face_1_20260414_085737_268529.jpg
+1d38b99f-342f-4b72-8590-8021b02d7e52,59,7.1,37,adulte,Femme,0.7175,triste,2026-04-13 22:51:52.094715+00,true,session_20260413_224928,camera_01,central_zone,face_59_20260413_225152_092715.jpg
+1e0b134d-ccb5-432e-8705-de8f1e9008a1,81,5.92,35,adulte,Homme,0.8759,neutre,2026-04-13 22:18:05.15121+00,true,session_20260413_221415,camera_01,central_zone,face_81_20260413_221805_150210.jpg
+1f0597b4-d5b1-4556-ab5c-5cf0da6ca950,1,5.78,30,jeune,Homme,0.7872,triste,2026-04-14 08:57:45.73751+00,true,session_20260414_085723,camera_01,central_zone,face_1_20260414_085745_736509.jpg
+21be55e0-3d2e-4990-8037-98c948714fa1,77,6.52,40,adulte,Homme,0.6146,triste,2026-04-13 22:52:53.724269+00,true,session_20260413_224928,camera_01,central_zone,face_77_20260413_225253_722266.jpg
+22418a99-37c3-4117-a851-76d830b4ef23,84,5.89,33,adulte,Femme,0.9987,heureux,2026-04-13 22:18:16.959566+00,true,session_20260413_221415,camera_01,central_zone,face_84_20260413_221816_958565.jpg
+24ecf8fa-51b1-445b-8705-64df8110e151,65,5.78,32,adulte,Homme,0.747,peur,2026-04-14 08:59:39.242906+00,true,session_20260414_085723,camera_01,central_zone,face_65_20260414_085939_241906.jpg
+283115b2-eba7-4461-91ca-5f97a75fa0fe,12,5.79,39,adulte,Homme,0.9985,triste,2026-04-13 22:49:48.508237+00,true,session_20260413_224928,camera_01,central_zone,face_12_20260413_224948_507238.jpg
+28a1e81b-a61d-4c34-bfca-9cc1df9b8326,22,5.83,29,jeune,Homme,0.794,peur,2026-04-14 08:53:51.675271+00,true,session_20260414_085239,camera_01,central_zone,face_22_20260414_085351_673272.jpg
+2ef68b0c-caa0-4e5c-a275-e640753b243b,65,5.87,32,adulte,Homme,0.8239,peur,2026-04-14 08:59:56.41423+00,true,session_20260414_085723,camera_01,central_zone,face_65_20260414_085956_413229.jpg
+311447fb-8980-49d1-8fec-e1f28aaa73b1,1,6.57,32,adulte,Homme,0.7012,triste,2026-04-14 08:57:54.680528+00,true,session_20260414_085723,camera_01,central_zone,face_1_20260414_085754_679527.jpg
+31f018d4-8b8c-4f49-86c8-f2bf80a8a9db,35,5.88,29,jeune,Femme,0.6506,triste,2026-04-13 22:51:00.425372+00,true,session_20260413_224928,camera_01,central_zone,face_35_20260413_225100_423373.jpg
+358ea22d-7a63-46a9-b38d-f90155232299,101,5.85,26,jeune,Homme,0.9997,triste,2026-04-13 22:19:07.917082+00,true,session_20260413_221415,camera_01,central_zone,face_101_20260413_221907_915083.jpg
+3758b414-88f1-4018-85f5-d43624606eb6,107,5.92,31,adulte,Femme,0.7371,neutre,2026-04-13 22:19:39.583225+00,true,session_20260413_221415,camera_01,central_zone,face_107_20260413_221939_582231.jpg
+3c140a56-7ffb-4068-9551-c5bd69ece008,25,5.85,24,jeune,Homme,0.997,neutre,2026-04-13 22:50:36.612652+00,true,session_20260413_224928,camera_01,central_zone,face_25_20260413_225036_611130.jpg
+434f5b9d-e6b2-45ca-9ae8-8536d782cf8a,76,5.89,29,jeune,Femme,0.794,triste,2026-04-13 22:17:44.728999+00,true,session_20260413_221415,camera_01,central_zone,face_76_20260413_221744_728003.jpg
+468c054e-5034-4f33-9937-a15cc74642e7,1,6.49,34,adulte,Homme,0.9767,en_colere,2026-04-13 22:14:49.8665+00,true,session_20260413_221415,camera_01,central_zone,face_1_20260413_221449_863503.jpg
+4896cc59-65fa-469a-9abf-c65bc82f6f4d,62,5.82,32,adulte,Homme,0.6529,peur,2026-04-13 22:52:08.280741+00,true,session_20260413_224928,camera_01,central_zone,face_62_20260413_225208_278742.jpg
+4b164c71-db71-4a32-a2ff-c58acf355b96,1,5.89,32,adulte,Homme,0.8105,peur,2026-04-14 08:53:01.58635+00,true,session_20260414_085239,camera_01,central_zone,face_1_20260414_085301_584844.jpg
+4b3c8f47-4906-4fe3-8d06-f0c241df1644,93,5.77,29,jeune,Homme,0.8753,neutre,2026-04-13 22:18:44.099661+00,true,session_20260413_221415,camera_01,central_zone,face_93_20260413_221844_098661.jpg
+4c7f9dde-7604-45ba-bc9b-8d1839f32fe0,96,5.84,43,adulte,Femme,0.9996,peur,2026-04-13 22:18:54.810303+00,true,session_20260413_221415,camera_01,central_zone,face_96_20260413_221854_808305.jpg
+4ccde608-7003-466e-9270-2e9361b5d275,20,5.85,29,jeune,Femme,1,heureux,2026-04-13 22:50:25.573812+00,true,session_20260413_224928,camera_01,central_zone,face_20_20260413_225025_572812.jpg
+51c5adb0-c539-4794-81a8-ba4d48fd6e61,1,6.2,28,jeune,Homme,0.7777,triste,2026-04-14 08:58:20.996197+00,true,session_20260414_085723,camera_01,central_zone,face_1_20260414_085820_995197.jpg
+57bffdbe-200a-4989-88dc-d3ca846f4555,95,5.97,29,jeune,Homme,0.7243,heureux,2026-04-13 22:53:58.647506+00,true,session_20260413_224928,camera_01,central_zone,face_95_20260413_225358_646505.jpg
+58222372-de45-4554-b8e6-f772d86f3c34,22,5.57,26,jeune,Homme,0.8648,triste,2026-04-14 08:54:10.679471+00,true,session_20260414_085239,camera_01,central_zone,face_22_20260414_085410_677473.jpg
+60350ee5-4576-4baa-859b-5453a18f25ae,22,5.72,24,jeune,Homme,0.9336,peur,2026-04-14 08:53:26.864296+00,true,session_20260414_085239,camera_01,central_zone,face_22_20260414_085326_863304.jpg
+610b5073-87e1-4f7b-818d-2367f20a7a7f,22,7.14,27,jeune,Homme,0.8768,triste,2026-04-14 08:54:01.158835+00,true,session_20260414_085239,camera_01,central_zone,face_22_20260414_085401_157833.jpg
+64fd66fc-b5b0-47ac-ae5f-ae13b83076c7,29,5.83,25,jeune,Homme,0.9803,neutre,2026-04-13 22:50:48.039595+00,true,session_20260413_224928,camera_01,central_zone,face_29_20260413_225048_037595.jpg
+6f4286bd-350f-4dcf-9e4a-0380e3ac7fa5,22,5.82,30,jeune,Homme,0.9707,triste,2026-04-14 08:53:09.926444+00,true,session_20260414_085239,camera_01,central_zone,face_22_20260414_085309_924433.jpg
+6fe4de2f-b864-4dad-9539-902699cccecb,1,11.72,31,adulte,Homme,0.9269,neutre,2026-04-14 08:52:52.682778+00,true,session_20260414_085239,camera_01,central_zone,face_1_20260414_085252_681778.jpg
+705eb188-77bf-447a-9eca-ca9fb0778936,65,5.93,32,adulte,Homme,0.791,peur,2026-04-14 08:59:47.690152+00,true,session_20260414_085723,camera_01,central_zone,face_65_20260414_085947_689152.jpg
+73183e83-ab4d-45b2-9fc1-5102c1dada91,107,5.79,28,jeune,Homme,0.9796,triste,2026-04-13 22:54:41.21306+00,true,session_20260413_224928,camera_01,central_zone,face_107_20260413_225441_212058.jpg
+764e6e0c-8749-42ef-94fc-73638d7e0429,89,5.86,35,adulte,Femme,0.629,neutre,2026-04-13 22:18:29.657508+00,true,session_20260413_221415,camera_01,central_zone,face_89_20260413_221829_656507.jpg
+816f7278-f032-4bb5-848a-425a5d1c3b1d,112,5.76,32,adulte,Femme,0.8236,triste,2026-04-13 22:20:01.339052+00,true,session_20260413_221415,camera_01,central_zone,face_112_20260413_222001_338053.jpg
+828e4a2c-0cb4-4b76-bfd1-45c435da52d5,103,5.77,34,adulte,Homme,0.7039,peur,2026-04-13 22:54:19.570191+00,true,session_20260413_224928,camera_01,central_zone,face_103_20260413_225419_568343.jpg
+91824d79-d119-4b69-8f62-4b83c79e0b24,1,8.81,37,adulte,Homme,0.7787,triste,2026-04-13 22:15:09.448559+00,true,session_20260413_221415,camera_01,central_zone,face_1_20260413_221509_446559.jpg
+92cd0ca9-6214-4959-a30b-a174b4675af8,88,5.88,37,adulte,Femme,0.9644,surpris,2026-04-13 22:53:21.065254+00,true,session_20260413_224928,camera_01,central_zone,face_88_20260413_225321_063255.jpg
+94322677-abf1-4521-be35-6afbce1cf3b3,1,5.84,36,adulte,Femme,0.8216,neutre,2026-04-13 22:15:17.678692+00,true,session_20260413_221415,camera_01,central_zone,face_1_20260413_221517_677694.jpg
+9d13c632-a883-4fac-8811-9e1314113858,29,5.83,35,adulte,Homme,0.673,peur,2026-04-13 22:15:38.796107+00,true,session_20260413_221415,camera_01,central_zone,face_29_20260413_221538_794106.jpg
+9e2e1294-f651-467a-a6c0-80003428fd4a,1,5.79,32,adulte,Homme,0.9454,heureux,2026-04-14 08:58:02.885786+00,true,session_20260414_085723,camera_01,central_zone,face_1_20260414_085802_884787.jpg
+9fe85316-6f99-4fa5-9bd7-913d12742835,65,6.51,33,adulte,Inconnu,0.584,triste,2026-04-14 08:59:31.066121+00,true,session_20260414_085723,camera_01,central_zone,face_65_20260414_085931_064122.jpg
+a2d465d1-fd03-4a7c-a152-2fde9599c3ed,1,5.96,33,adulte,Homme,0.7405,en_colere,2026-04-13 22:14:58.185861+00,true,session_20260413_221415,camera_01,central_zone,face_1_20260413_221458_184861.jpg
+a41d2fb5-15b1-42cf-b17f-449e7511a260,80,5.83,36,adulte,Homme,0.7811,neutre,2026-04-13 22:17:55.209457+00,true,session_20260413_221415,camera_01,central_zone,face_80_20260413_221755_207455.jpg
+aaf464b5-d081-452b-aa1f-275153847187,17,5.84,27,jeune,Femme,0.9531,triste,2026-04-13 22:50:04.725339+00,true,session_20260413_224928,camera_01,central_zone,face_17_20260413_225004_723341.jpg
+ae1c469a-4f42-4345-8274-5400cd744494,5,13.5,24,jeune,Homme,0.9947,en_colere,2026-04-13 22:14:31.340312+00,true,session_20260413_221415,camera_01,central_zone,face_5_20260413_221431_338312.jpg
+af7472fa-535b-41e9-9367-a066062cfea5,1,12.15,26,jeune,Homme,0.8228,triste,2026-04-14 08:51:19.977424+00,true,session_20260414_085103,camera_01,central_zone,face_1_20260414_085119_969420.jpg
+afb62af8-3037-454f-8cf7-39ceb8f8f525,131,5.81,31,adulte,Homme,0.9908,heureux,2026-04-13 22:21:02.731346+00,true,session_20260413_221415,camera_01,central_zone,face_131_20260413_222102_730343.jpg
+b7ab655b-ab2b-44dc-9426-75df20ea2ecd,114,6.49,31,adulte,Femme,0.9963,heureux,2026-04-13 22:55:32.223856+00,true,session_20260413_224928,camera_01,central_zone,face_114_20260413_225532_221342.jpg
+b84222af-af08-47c8-9c45-771da6748029,1,5.92,33,adulte,Homme,0.9329,peur,2026-04-13 22:14:40.844117+00,true,session_20260413_221415,camera_01,central_zone,face_1_20260413_221440_842117.jpg
+b9bf3726-f6ab-4b4f-84cc-02c68473cf2c,110,5.87,31,adulte,Femme,1,triste,2026-04-13 22:55:03.995878+00,true,session_20260413_224928,camera_01,central_zone,face_110_20260413_225503_993880.jpg
+ba70f864-86da-4b16-b18e-a15167bfebba,124,5.88,35,adulte,Homme,0.9702,peur,2026-04-13 22:20:32.422212+00,true,session_20260413_221415,camera_01,central_zone,face_124_20260413_222032_420213.jpg
+c03409c0-fbec-4cc8-8959-b38731169e3c,39,5.74,39,adulte,Femme,0.9944,surpris,2026-04-13 22:51:11.10068+00,true,session_20260413_224928,camera_01,central_zone,face_39_20260413_225111_098682.jpg
+c23b4f9e-44b3-4e17-a765-e279e2ce1b7c,127,5.85,35,adulte,Homme,0.9979,neutre,2026-04-13 22:20:50.385942+00,true,session_20260413_221415,camera_01,central_zone,face_127_20260413_222050_383944.jpg
+c3311405-86a7-4a42-9a36-efd155106701,30,5.88,29,jeune,Femme,0.9503,triste,2026-04-13 22:15:30.61272+00,true,session_20260413_221415,camera_01,central_zone,face_30_20260413_221530_611720.jpg
+c569ec45-b4da-4585-8c94-4814c3a0069c,118,6.46,32,adulte,Femme,0.8435,triste,2026-04-13 22:20:16.895039+00,true,session_20260413_221415,camera_01,central_zone,face_118_20260413_222016_893535.jpg
+c6f74943-ce1e-4a15-a537-e7cb948fc89b,64,5.9,37,adulte,Homme,0.9927,neutre,2026-04-13 22:16:59.418629+00,true,session_20260413_221415,camera_01,central_zone,face_64_20260413_221659_417629.jpg
+c9b8689a-5871-4ae8-8d37-1dda76eee6fd,42,5.81,30,jeune,Homme,0.6571,peur,2026-04-14 08:58:55.104964+00,true,session_20260414_085723,camera_01,central_zone,face_42_20260414_085855_101963.jpg
+ca74b111-9902-424c-b9e2-c897b2b0947b,49,5.96,29,jeune,Femme,0.6793,peur,2026-04-14 08:59:21.751273+00,true,session_20260414_085723,camera_01,central_zone,face_49_20260414_085921_750273.jpg
+cda84b4f-bcb4-45d3-aee4-e8ef51631197,29,7.12,31,adulte,Homme,0.8614,heureux,2026-04-13 22:16:06.334741+00,true,session_20260413_221415,camera_01,central_zone,face_29_20260413_221606_333736.jpg
+cfc0a5fb-e4bb-46ca-a826-860fb97cc71c,65,5.81,33,adulte,Homme,0.8758,peur,2026-04-14 09:00:04.632066+00,true,session_20260414_085723,camera_01,central_zone,face_65_20260414_090004_631067.jpg
+d2bde08f-6ae5-4f24-9f9d-d483f19f425f,23,6.4,25,jeune,Homme,0.8274,triste,2026-04-14 08:58:43.949563+00,true,session_20260414_085723,camera_01,central_zone,face_23_20260414_085843_946564.jpg
+d32b5f55-9234-4813-a950-5d8f8b178089,139,5.87,30,jeune,Homme,0.9439,neutre,2026-04-13 22:21:16.429543+00,true,session_20260413_221415,camera_01,central_zone,face_139_20260413_222116_427544.jpg
+d8fbdb4c-183c-48c8-a8bc-ca0c20a1a9d4,22,5.82,24,jeune,Homme,0.9394,peur,2026-04-14 08:53:35.102164+00,true,session_20260414_085239,camera_01,central_zone,face_22_20260414_085335_100167.jpg
+d95169b6-74ce-4e64-9cce-eec67dff6da5,37,7.09,34,adulte,Homme,0.696,triste,2026-04-13 22:15:48.51904+00,true,session_20260413_221415,camera_01,central_zone,face_37_20260413_221548_518042.jpg
+e8a81b38-51f6-4ab0-9cd9-70fe8d745b1b,70,6.14,32,adulte,Homme,0.7236,triste,2026-04-13 22:17:18.907595+00,true,session_20260413_221415,camera_01,central_zone,face_70_20260413_221718_906595.jpg
+e9b28029-90f2-48fa-b152-6f3cb9ae8d38,23,5.9,29,jeune,Homme,0.8372,peur,2026-04-14 08:58:35.195754+00,true,session_20260414_085723,camera_01,central_zone,face_23_20260414_085835_193758.jpg
+efd4abaf-8283-449e-b693-6c1ac40a8b90,99,5.81,27,jeune,Homme,0.8062,heureux,2026-04-13 22:54:08.333183+00,true,session_20260413_224928,camera_01,central_zone,face_99_20260413_225408_332184.jpg
+f093ef36-29f2-423c-9979-4fc681492305,52,7.33,38,adulte,Femme,0.996,neutre,2026-04-13 22:51:40.089833+00,true,session_20260413_224928,camera_01,central_zone,face_52_20260413_225140_087833.jpg
+f54ce3f2-7fa8-4c13-86e8-dba4ff579e89,67,5.82,30,jeune,Homme,0.9753,neutre,2026-04-13 22:52:31.964111+00,true,session_20260413_224928,camera_01,central_zone,face_67_20260413_225231_963110.jpg
+f7068911-6b08-408d-8fc6-932d73eca6b9,143,6.03,36,adulte,Femme,0.7773,triste,2026-04-13 22:21:50.484602+00,true,session_20260413_221415,camera_01,central_zone,face_143_20260413_222150_483602.jpg
+f9e90739-da8b-4b42-ae16-4460509a5312,46,5.81,27,jeune,Homme,0.9999,triste,2026-04-13 22:51:26.493333+00,true,session_20260413_224928,camera_01,central_zone,face_46_20260413_225126_491333.jpg
+fb32e461-dbab-4802-ac88-6807d0b9b7d8,43,5.98,32,adulte,Femme,0.7349,triste,2026-04-13 22:16:32.060161+00,true,session_20260413_221415,camera_01,central_zone,face_43_20260413_221632_058161.jpg
+"""
+
+# ─────────────────────────────────────────
+# 2.  AUGMENTATION CONFIG
+# ─────────────────────────────────────────
+random.seed(42)
+
+# Target counts after augmentation
+TARGETS = {
+    "gender": {"Homme": 55, "Femme": 55},
+    "age_range": {
+        "bebe": 10,
+        "enfant": 12,
+        "jeune": 32,   # keep original
+        "adulte": 48,  # keep original
+        "personne_agee": 12,
+    },
+    "emotion": {
+        "triste": 20,
+        "peur": 16,
+        "neutre": 20,
+        "heureux": 18,
+        "en_colere": 14,
+        "surpris": 12,
+        "degout": 10,
+    },
+}
+
+# Age ranges per category (min, max)
+AGE_RANGES = {
+    "bebe":          (0, 5),
+    "enfant":        (6, 14),
+    "jeune":         (15, 30),
+    "adulte":        (31, 50),
+    "personne_agee": (51, 80),
+}
+
+# Gender confidence distributions
+GENDER_CONF = {
+    "Homme": (0.70, 0.99),
+    "Femme": (0.65, 0.9999),
+}
+
+# Dwell seconds per age group (realistic ranges)
+DWELL_BY_AGE = {
+    "bebe":          (3.5, 7.0),
+    "enfant":        (4.0, 9.0),
+    "jeune":         (5.0, 13.0),
+    "adulte":        (5.0, 12.0),
+    "personne_agee": (5.5, 15.0),
+}
+
+BASE_DATE = datetime(2026, 4, 14, 9, 0, 0)
+SESSION_SYNTH = "session_synth_augmented"
+FIELDNAMES = [
+    "id", "track_id", "dwell_seconds", "age_estimated", "age_range",
+    "gender", "gender_confidence", "emotion_estimated", "created_at",
+    "validated", "session_id", "camera_id", "roi_name", "image_name"
+]
+
+# ─────────────────────────────────────────
+# 3.  HELPERS
+# ─────────────────────────────────────────
+def rand_track_id():
+    return random.randint(200, 9999)
+
+def rand_gender_conf(gender):
+    lo, hi = GENDER_CONF.get(gender, (0.65, 0.99))
+    return round(random.uniform(lo, hi), 4)
+
+def rand_age(age_range):
+    lo, hi = AGE_RANGES[age_range]
+    return random.randint(lo, hi)
+
+def rand_dwell(age_range):
+    lo, hi = DWELL_BY_AGE[age_range]
+    return round(random.uniform(lo, hi), 2)
+
+def rand_ts():
+    offset = timedelta(seconds=random.randint(0, 7200))
+    ts = BASE_DATE + offset
+    return ts.strftime("%Y-%m-%d %H:%M:%S.%f+00")
+
+def make_row(gender, age_range, emotion):
+    track_id = rand_track_id()
+    age = rand_age(age_range)
+    dwell = rand_dwell(age_range)
+    ts = rand_ts()
+    conf = rand_gender_conf(gender)
+    fname_ts = ts[:19].replace("-", "").replace(" ", "_").replace(":", "")
+    image_name = f"synth_{track_id}_{fname_ts}.jpg"
+    return {
+        "id": str(uuid.uuid4()),
+        "track_id": track_id,
+        "dwell_seconds": dwell,
+        "age_estimated": age,
+        "age_range": age_range,
+        "gender": gender,
+        "gender_confidence": conf,
+        "emotion_estimated": emotion,
+        "created_at": ts,
+        "validated": "true",
+        "session_id": SESSION_SYNTH,
+        "camera_id": "camera_01",
+        "roi_name": "central_zone",
+        "image_name": image_name,
+    }
+
+# ─────────────────────────────────────────
+# 4.  LOAD ORIGINAL ROWS
+# ─────────────────────────────────────────
+reader = csv.DictReader(StringIO(ORIGINAL_CSV.strip()))
+original_rows = list(reader)
+print(f"Original rows loaded: {len(original_rows)}")
+
+# ─────────────────────────────────────────
+# 5.  GENERATE SYNTHETIC ROWS
+# ─────────────────────────────────────────
+synthetic_rows = []
+
+# --- 5a. Fix GENDER imbalance ---
+# Add Femme rows with balanced emotion distribution
+femme_emotions = ["heureux", "neutre", "surpris", "triste", "en_colere", "degout", "peur"]
+femme_age_ranges = ["jeune", "adulte", "jeune", "adulte", "personne_agee", "enfant"]
+n_femme_to_add = TARGETS["gender"]["Femme"] - 24  # 24 existing Femme
+
+for i in range(n_femme_to_add):
+    emotion = femme_emotions[i % len(femme_emotions)]
+    age_range = femme_age_ranges[i % len(femme_age_ranges)]
+    synthetic_rows.append(make_row("Femme", age_range, emotion))
+
+# --- 5b. Fix AGE RANGE imbalance (bebe, enfant, personne_agee) ---
+age_emotion_map = {
+    "bebe":          ["neutre", "heureux", "surpris", "degout"],
+    "enfant":        ["heureux", "surpris", "neutre", "peur", "en_colere"],
+    "personne_agee": ["neutre", "triste", "heureux", "surpris", "en_colere", "degout"],
+}
+age_gender_mix = {
+    "bebe":          ["Homme", "Femme", "Femme", "Homme"],
+    "enfant":        ["Homme", "Femme", "Homme", "Femme", "Homme"],
+    "personne_agee": ["Homme", "Femme", "Homme", "Homme", "Femme", "Femme"],
+}
+
+for age_range, target in TARGETS["age_range"].items():
+    if age_range in ("jeune", "adulte"):
+        continue  # already covered
+    emotions = age_emotion_map[age_range]
+    genders = age_gender_mix[age_range]
+    for i in range(target):
+        emotion = emotions[i % len(emotions)]
+        gender = genders[i % len(genders)]
+        synthetic_rows.append(make_row(gender, age_range, emotion))
+
+# --- 5c. Fix EMOTION imbalance ---
+# Count current totals (original + what we've added so far)
+all_rows_so_far = original_rows + synthetic_rows
+emotion_counts = Counter(r["emotion_estimated"] for r in all_rows_so_far)
+
+for emotion, target in TARGETS["emotion"].items():
+    current = emotion_counts.get(emotion, 0)
+    deficit = target - current
+    if deficit <= 0:
+        continue
+    # Mix genders and adult/jeune age ranges
+    genders = ["Homme", "Femme"] * (deficit // 2 + 1)
+    ages = ["adulte", "jeune"] * (deficit // 2 + 1)
+    for i in range(deficit):
+        synthetic_rows.append(make_row(genders[i], ages[i], emotion))
+
+# ─────────────────────────────────────────
+# 6.  WRITE OUTPUT
+# ─────────────────────────────────────────
+all_rows = original_rows + synthetic_rows
+OUTPUT_CSV = "augmented_dataset.csv"
+REPORT_TXT = "augmentation_report.txt"
+
+with open(OUTPUT_CSV, "w", newline="") as f:
+    writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+    writer.writeheader()
+    writer.writerows(all_rows)
+
+# ─────────────────────────────────────────
+# 7.  REPORT
+# ─────────────────────────────────────────
+orig_gender   = Counter(r["gender"] for r in original_rows)
+orig_age      = Counter(r["age_range"] for r in original_rows)
+orig_emotion  = Counter(r["emotion_estimated"] for r in original_rows)
+
+aug_gender    = Counter(r["gender"] for r in all_rows)
+aug_age       = Counter(r["age_range"] for r in all_rows)
+aug_emotion   = Counter(r["emotion_estimated"] for r in all_rows)
+
+lines = []
+lines.append("=" * 55)
+lines.append("  AUDIENCE DATASET — AUGMENTATION REPORT")
+lines.append("=" * 55)
+lines.append(f"  Original rows : {len(original_rows)}")
+lines.append(f"  Synthetic rows: {len(synthetic_rows)}")
+lines.append(f"  Total rows    : {len(all_rows)}")
+lines.append("")
+
+def section(title, before, after):
+    lines.append(f"── {title} ──")
+    all_keys = sorted(set(list(before.keys()) + list(after.keys())))
+    for k in all_keys:
+        b = before.get(k, 0)
+        a = after.get(k, 0)
+        bar = "█" * min(a, 40)
+        lines.append(f"  {k:20s}  {b:3d} → {a:3d}  {bar}")
+    lines.append("")
+
+section("GENDER",    orig_gender,  aug_gender)
+section("AGE RANGE", orig_age,     aug_age)
+section("EMOTION",   orig_emotion, aug_emotion)
+
+report = "\n".join(lines)
+with open(REPORT_TXT, "w", encoding="utf-8") as f:
+    f.write(report)
+
+print(report)
+print(f"\n✅ Files written:")
+print(f"   {OUTPUT_CSV}")
+print(f"   {REPORT_TXT}")

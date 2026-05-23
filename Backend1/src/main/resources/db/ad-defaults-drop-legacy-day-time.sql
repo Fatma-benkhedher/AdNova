@@ -1,0 +1,4 @@
+-- Optional (only after verifying your app no longer needs legacy columns):
+-- ALTER TABLE ad_defaults DROP CONSTRAINT IF EXISTS ad_defaults_day_slot_time_unique;
+-- ALTER TABLE ad_defaults DROP COLUMN IF EXISTS day;
+-- ALTER TABLE ad_defaults DROP COLUMN IF EXISTS slot_time;

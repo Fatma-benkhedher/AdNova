@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="theme-color" content="#000000">
+  <link rel="manifest" href="/manifest.json">
+  <title>Makerskills</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html {
+      height: calc(100% + 1px);
+      background: #000;
+    }
+    body {
+      width: 100%;
+      min-height: 100vh;
+      background: #000;
+      overflow: hidden;
+    }
+    #videoPlayer {
+      position: fixed;
+      inset: 0;
+      width: 100vw;
+      height: 100vh;
+      object-fit: cover;
+      display: none;
+      will-change: opacity;
+      transform: translateZ(0);
+      z-index: 10;
+    }
+    #touchBlocker {
+      position: fixed;
+      inset: 0;
+      z-index: 9999;
+      background: transparent;
+      touch-action: none;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+ .heart {
+  position: fixed;
+  bottom: 0;
+  font-size: 40px;
+  animation: floatUp 2s linear forwards;
+  opacity: 1;
+  z-index: 9999; /* ← add this */
+  pointer-events: none; /* ← so it doesn't interfere with touchBlocker */
+}
+
+@keyframes floatUp {
+  0% {
+    transform: translateY(0) scale(0.8);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(-100vh) scale(1.5);
+    opacity: 0;
+  }
+}
+    #camera, #canvas { display: none; }
+  </style>
+</head>
+<body>
+<!-- Splash Screen -->
+<div id="splash" style="
+  position: fixed;
+  inset: 0;
+  background: #ffffff;
+  z-index: 99999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 30px;
+">
+  <img src="/icon.png" id="splashIcon" style="
+    width: 180px;
+    height: 180px;
+    object-fit: contain;
+    opacity: 0;
+    transform: scale(0.5);
+    transition: opacity 0.6s ease, transform 0.6s ease;
+  "/>
+  <div id="splashText" style="
+    color: rgb(12, 5, 39);
+    font-family: Arial, sans-serif;
+    font-size: 42px;
+    font-weight: bold;
+    letter-spacing: 6px;
+    opacity: 0;
+    transform: translateY(20px);
+    transition: opacity 0.6s ease 0.4s, transform 0.6s ease 0.4s;
+  ">MAKERSKILLS</div>
+  <div id="splashBar" style="
+    width: 0px;
+    height: 3px;
+    background: rgb(12, 5, 39);
+    transition: width 1.5s ease 0.8s;
+    border-radius: 2px;
+  "></div>
+</div>
+  <div id="touchBlocker"></div>
+  <div id="heartContainer"></div>
+  <video
+    id="videoPlayer"
+    autoplay
+    playsinline
+    preload="auto"
+    disablepictureinpicture
+  ></video>
+
+  <img id="defaultImg" src="/default.jpg" style="
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  z-index: 5;
+  display: block;
+"/>
+<video id="defaultVideo" playsinline style="
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  object-fit: cover;
+  z-index: 5;
+  display: none;
+">
+  <source src="/videodefault.mp4" type="video/mp4">
+</video>
+
+  <video id="camera" autoplay playsinline muted></video>
+  <canvas id="canvas"></canvas>
+
+  <script>
+    'use strict';
+
+  
+    const player = document.getElementById('videoPlayer');
+    let currentVideo = null;
+    let stopTimer    = null;
+    let isPlaying    = false;
+
+    // ── Masquer la barre d'adresse ────────────────────────────────────────
+    function hideAddressBar() {
+      if (window.matchMedia('(display-mode: fullscreen)').matches) return;
+      if (window.matchMedia('(display-mode: standalone)').matches) return;
+      window.scrollTo(0, 1);
+    }
+    window.addEventListener('load', () => {
+      setTimeout(hideAddressBar, 50);
+      setTimeout(hideAddressBar, 200);
+      setTimeout(hideAddressBar, 600);
+    });
+    window.addEventListener('focus',    hideAddressBar);
+    window.addEventListener('pageshow', hideAddressBar);
+    window.addEventListener('resize',   () => setTimeout(hideAddressBar, 100));
+    setInterval(hideAddressBar, 2000);
+
+    // ── Orientation paysage ───────────────────────────────────────────────
+    async function lockLandscape() {
+      try {
+        if (screen.orientation && screen.orientation.lock) {
+          await screen.orientation.lock('landscape');
+        }
+      } catch (_) {}
+    }
+
+    // ── Fullscreen ────────────────────────────────────────────────────────
+    async function tryFullscreen() {
+      const el = document.documentElement;
+      try {
+        if (el.requestFullscreen && !document.fullscreenElement) {
+          await el.requestFullscreen({ navigationUI: 'hide' });
+        } else if (el.webkitRequestFullscreen && !document.webkitFullscreenElement) {
+          el.webkitRequestFullscreen();
+        }
+      } catch (_) {}
+    }
+
+    // ── WakeLock : écran toujours allumé ──────────────────────────────────
+    async function requestWakeLock() {
+      if (!('wakeLock' in navigator)) return;
+      try { await navigator.wakeLock.request('screen'); }
+      catch (_) {}
+    }
+
+    document.addEventListener('visibilitychange', async () => {
+      if (document.visibilityState === 'visible') {
+        await requestWakeLock();
+        hideAddressBar();
+        if (isPlaying && player.paused) player.play().catch(() => {});
+      }
+    });
+
+    // ── Lecture vidéo ─────────────────────────────────────────────────────
+   function showVideo() {
+  player.style.display = 'block';
+  document.getElementById('defaultImg').style.display = 'none';
+  document.getElementById('defaultVideo').style.display = 'none';
+}
+function hideVideo() {
+  player.style.display = 'none';
+  defaultLoopRunning = false; 
+  startDefaultLoop();
+}
+    function stopPlayback() {
+      if (!isPlaying) return;
+      isPlaying   = false;
+      player.loop = false;
+      player.pause();
+      hideVideo();
+      clearTimeout(stopTimer);
+      stopTimer = null;
+    }
+
+    function startPlayback(secondsLeft) {
+  if (isPlaying) return;
+  isPlaying   = true;
+  player.loop = false;
+  showVideo();
+  const p = player.play();
+  if (p !== undefined) {
+    p.catch(err => {
+      if (err.name === 'AbortError') {
+        setTimeout(() => player.play().catch(() => {}), 300);
+      }
+    });
+  }
+  clearTimeout(stopTimer);
+  stopTimer = setTimeout(stopPlayback, secondsLeft * 1000);
+
+  // Hide video when it ends naturally
+  player.onended = () => stopPlayback();
+}
+
+    // ── Polling /latest_video toutes les 5s ───────────────────────────────
+   async function checkForNewVideo() {
+  try {
+    const res  = await fetch('/latest_video', { cache: 'no-store' });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      const { video, seconds_left } = data;
+      if (video !== currentVideo) {
+        currentVideo = video;
+        isPlaying    = false;
+        clearTimeout(stopTimer);
+        stopTimer      = null;
+        player.loop    = false;
+        player.onended = null;
+        player.src     = '/video?t=' + Date.now();
+        player.load();
+        // Wait for video to be ready before playing
+        await new Promise(r => {
+          player.oncanplay = r;
+          setTimeout(r, 3000); // fallback after 3s
+        });
+        if (seconds_left > 0) startPlayback(seconds_left);
+      }
+    } else {
+      stopPlayback();
+    }
+  } catch (_) {}
+}
+
+    // ── Batterie Samsung ──────────────────────────────────────────────────
+    // FIX : écoute les changements en temps réel + log détaillé
+    let batteryObj = null;
+
+    async function initBattery() {
+      if (!('getBattery' in navigator)) {
+        console.warn('[BATTERY] API non disponible sur ce navigateur');
+        return;
+      }
+      try {
+        batteryObj = await navigator.getBattery();
+        console.log(`[BATTERY] Niveau initial: ${Math.round(batteryObj.level * 100)}%`);
+
+        // Écoute les changements en temps réel
+        batteryObj.addEventListener('levelchange', () => {
+          const pct = Math.round(batteryObj.level * 100);
+          console.log(`[BATTERY] Changement: ${pct}%`);
+          sendStatus();
+        });
+        batteryObj.addEventListener('chargingchange', () => {
+          console.log(`[BATTERY] Chargement: ${batteryObj.charging}`);
+          sendStatus();
+        });
+      } catch (e) {
+        console.warn('[BATTERY] Erreur:', e.message);
+      }
+    }
+
+    async function getBatteryLevel() {
+      if (batteryObj) return Math.round(batteryObj.level * 100);
+      if (!('getBattery' in navigator)) return null;
+      try {
+        const b = await navigator.getBattery();
+        return Math.round(b.level * 100);
+      } catch (_) { return null; }
+    }
+
+    async function sendStatus() {
+      const battery = await getBatteryLevel();
+      console.log(`[STATUS] Envoi batterie: ${battery}%`);
+      try {
+        const resp = await fetch('/update_status', {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body:    JSON.stringify({
+            pourcentage_batterie: battery,
+            'temperature-carte':  null,
+          }),
+        });
+        const json = await resp.json();
+        console.log('[STATUS] Réponse:', json);
+      } catch (e) {
+        console.warn('[STATUS ERROR]', e);
+      }
+    }
+
+    // ── Caméra frontale ───────────────────────────────────────────────────
+    // FIX : demande explicite de permission + logs détaillés
+    async function startCameraStream() {
+  const camEl  = document.getElementById('camera');
+  const canvas = document.getElementById('canvas');
+  const ctx    = canvas.getContext('2d');
+
+  while (true) {  // keep retrying forever
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        console.error('[CAMERA] Not available');
+        break;
+      }
+
+      const tries = [
+        { video: { facingMode: { exact: 'user' }, width: { ideal: 640 }, height: { ideal: 480 } } },
+        { video: { facingMode: 'user' } },
+        { video: true },
+      ];
+
+      let stream = null;
+      for (const c of tries) {
+        try { stream = await navigator.mediaDevices.getUserMedia(c); break; }
+        catch (e) { console.warn('[CAMERA] Try failed:', e.message); }
+      }
+
+      if (!stream) throw new Error('No camera');
+
+      camEl.srcObject = stream;
+      await new Promise(r => { camEl.onloadedmetadata = () => camEl.play().then(r).catch(r); });
+      console.log('[CAMERA] Active');
+
+      // Send frames
+      const interval = setInterval(() => {
+        if (camEl.readyState < 2) return;
+        canvas.width = camEl.videoWidth;
+        canvas.height = camEl.videoHeight;
+        ctx.drawImage(camEl, 0, 0);
+        canvas.toBlob(blob => {
+          if (!blob) return;
+          const form = new FormData();
+          form.append('frame', blob, 'frame.jpg');
+          fetch('/upload_frame', { method: 'POST', body: form }).catch(() => {});
+        }, 'image/jpeg', 0.7);
+      }, 200);
+
+      // Wait for stream to die
+      await new Promise(r => stream.getVideoTracks()[0].onended = r);
+      clearInterval(interval);
+      console.log('[CAMERA] Stream ended, restarting...');
+
+    } catch(e) {
+      console.error('[CAMERA] Error:', e.message);
+    }
+
+    await new Promise(r => setTimeout(r, 2000)); // wait 2s before retry
+  }
+}
+    // ── Boot ──────────────────────────────────────────────────────────────
+    async function boot() {
+      hideAddressBar();
+      await lockLandscape();
+      await requestWakeLock();
+      await tryFullscreen();
+      startDefaultLoop();
+      // Initialise la batterie en premier
+      await initBattery();
+
+      // Lance le polling vidéo
+      await checkForNewVideo();
+      setInterval(checkForNewVideo, 5000);
+
+      // Envoie le statut tout de suite puis toutes les 5 min
+      sendStatus();
+      setInterval(sendStatus, 300_000);
+
+      // Lance la caméra
+       startCameraStream();
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', boot);
+    } else {
+      boot();
+    }
+
+    const heart = document.getElementById("heart");
+
+let lastHeartId   = null;
+let lastSmileId   = null;
+let lastDislikeId = null;
+
+async function checkReactions() {
+  try {
+    const [heartRes, smileRes, dislikeRes] = await Promise.all([
+      fetch("/heart_status",   { cache: 'no-store' }),
+      fetch("/smile_status",   { cache: 'no-store' }),
+      fetch("/dislike_status", { cache: 'no-store' }),
+    ]);
+
+    const heart   = await heartRes.json();
+    const smile   = await smileRes.json();
+    const dislike = await dislikeRes.json();
+
+    if (heart.active && heart.id !== lastHeartId) {
+      lastHeartId = heart.id;
+      spawnEmojis("❤️");
+    }
+    if (smile.active && smile.id !== lastSmileId) {
+      lastSmileId = smile.id;
+      spawnEmojis("😊");
+    }
+    if (dislike.active && dislike.id !== lastDislikeId) {
+      lastDislikeId = dislike.id;
+      spawnEmojis("👎");
+    }
+  } catch (_) {}
+}
+
+function spawnEmojis(emoji) {
+  for (let i = 0; i < 30; i++) {
+    const el = document.createElement("div");
+    el.className = "heart";
+    el.innerText = emoji;
+    el.style.left              = Math.random() * 100 + "vw";
+    el.style.fontSize          = (20 + Math.random() * 40) + "px";
+    el.style.animationDuration = (1.5 + Math.random() * 1.5) + "s";
+    document.body.appendChild(el);
+    setTimeout(() => el.remove(), 3000);
+  }
+}
+
+// Start reactions polling immediately — don't wait for boot()
+setInterval(checkReactions, 300);
+checkReactions(); // run once immediately too
+// ── Splash Screen ──────────────────────────────────────────────────────
+function runSplash() {
+  const splash = document.getElementById('splash');
+  const icon   = document.getElementById('splashIcon');
+  const text   = document.getElementById('splashText');
+  const bar    = document.getElementById('splashBar');
+
+  // Trigger animations
+  requestAnimationFrame(() => {
+    icon.style.opacity   = '1';
+    icon.style.transform = 'scale(1)';
+    text.style.opacity   = '1';
+    text.style.transform = 'translateY(0)';
+    bar.style.width      = '200px';
+  });
+
+  // Fade out and remove after 2.5s
+  setTimeout(() => {
+    splash.style.transition = 'opacity 0.6s ease';
+    splash.style.opacity    = '0';
+    setTimeout(() => splash.remove(), 600);
+  }, 2500);
+}
+
+runSplash();
+let defaultLoopRunning = false;
+
+function startDefaultLoop() {
+  if (defaultLoopRunning) return; // ← prevent duplicates
+  defaultLoopRunning = true;
+
+  const img = document.getElementById('defaultImg');
+  const vid = document.getElementById('defaultVideo');
+  const PHOTO_DURATION = 10000;
+
+  function showPhoto() {
+    if (isPlaying) { defaultLoopRunning = false; return; }
+    vid.pause();
+    vid.style.display = 'none';
+    img.style.display = 'block';
+    setTimeout(showDefaultVideo, PHOTO_DURATION);
+  }
+
+  function showDefaultVideo() {
+    if (isPlaying) { defaultLoopRunning = false; return; }
+    img.style.display = 'none';
+    vid.style.display = 'block';
+    vid.currentTime = 0;
+    vid.play().catch(() => {});
+    vid.onended = showPhoto;
+  }
+
+  showPhoto();
+}
+  </script>
+
+</body>
+
+</html>

@@ -1,0 +1,20 @@
+# Virtual environments
+venv/
+.venv/
+.venv311/
+Ras_pi/venv/
+Ras_pi/.venv311/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# ML models (too big)
+*.pt
+*.pth
+
+# Env files
+.env
+
+# System files
+.DS_Store
